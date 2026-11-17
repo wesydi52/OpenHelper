@@ -1,7 +1,9 @@
-anthropic>=0.40
 requests
+# Поиск в интернете из Telegram (необязательно):
 ddgs
 # Голосовой режим (необязательно):
 # SpeechRecognition
 # pyaudio
 # pyttsx3
+# Полностью офлайн-распознавание речи (необязательно):
+# vosk
