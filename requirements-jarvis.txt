@@ -1,0 +1,7 @@
+anthropic>=0.40
+requests
+ddgs
+# Голосовой режим (необязательно):
+# SpeechRecognition
+# pyaudio
+# pyttsx3
