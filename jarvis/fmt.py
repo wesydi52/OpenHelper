@@ -43,6 +43,10 @@ def alert_text(item: dict, offset: int, now: datetime) -> str:
     title = item["title"]
     if offset == SNOOZE_OFFSET:
         return f"Повторяю: {title}."
+    if item["kind"] == "timer":
+        return "Таймер: время вышло."
+    if item["kind"] == "alarm":
+        return "Будильник. Пора вставать."
     if now - when > timedelta(minutes=5):
         return f"Пропущенное напоминание: {title}. Время было {fmt_when(when, now)}."
     if item["kind"] == "reminder":

@@ -6,8 +6,15 @@ import re
 from datetime import datetime, time, timedelta
 
 from . import fmt
+from .common import CANCEL_WORDS, NO, YES
+from .intents import EXTRA_KINDS, Extras
+from .pc import Pc
 from .ruparse import NUM, parse_when, resolve_ask, to_int
+from .services import Services
 from .skills import info, mail, system
+from .spoken import Urgent
+from .spotify import Spotify
+from .vacuum import NotConfigured
 
 HELP = ("Умею: запоминать дела со сроком («запомни, что мне надо сдать отчёт до пятницы 18:00»), "
         "напоминать («напомни через час позвонить маме»), называть дела («что у меня на сегодня»), "
@@ -31,8 +38,13 @@ DONE = re.compile(r"^(?:я\s+)?(?:уже\s+)?(?:все\s+)?(?:готово|сд�
 PAST = re.compile(r"^[а-я]{2,}(?:л|ла|ло|ли|лся|лась|лись)$")   # глагол прошедшего времени: «позвонил»
 SNOOZE_WORDS = ("позже", "потом", "попозже", "отложи", "отложить", "не сейчас")
 ORDINALS = {"первое": 1, "первый": 1, "второе": 2, "второй": 2, "третье": 3, "третий": 3}
-YES = re.compile(r"^(?:да|давай|разберем|разберём|конечно|ага|угу|можно)\b")
-NO = re.compile(r"^(?:нет|не сейчас|потом|позже|не надо|не нужно)\b")
+
+
+ACTION_NAMES = {"restart": "перезапуск", "shutdown": "выключение", "sleep": "спящий режим"}
+
+
+def fmt_action(action: str) -> str:
+    return ACTION_NAMES.get(action, action)
 
 
 def _clean_task(text: str) -> str:
@@ -45,10 +57,18 @@ def _clean_task(text: str) -> str:
 
 
 class Assistant:
-    def __init__(self, cfg, store, now=datetime.now):
+    def __init__(self, cfg, store, now=datetime.now, pc=None, spotify=None, services=None, vacuum=None):
         self.cfg, self.store, self.now = cfg, store, now
         self.pending: dict = {}  # source -> уточняющий вопрос
         self.fails: dict = {}    # source -> сколько раз подряд не поняли
+        self.pc = pc or Pc()
+        self.spotify = spotify or Spotify(cfg)
+        self.services = services or Services(cfg)
+        self.vacuum = vacuum or NotConfigured()
+        self.countdown: dict | None = None     # отложенное опасное действие: {"action", "due", "source"}
+        self.voice_mode = False                # включает cli в голосовом режиме
+        self._music_paused = False             # музыку на паузу поставили мы (из-за шума) — потом вернём
+        self.x = Extras(self)
 
     # ---------- вход ----------
     def handle(self, text: str, source: str = "local") -> str:
@@ -59,13 +79,18 @@ class Assistant:
         st = self.pending.get(source)
         if st and self.now() - st["ts"] > PENDING_TTL:
             del self.pending[source]
-        if low in ("отмена", "отмени", "забудь", "неважно"):
+        if self.countdown and low in CANCEL_WORDS:
+            what = fmt_action(self.countdown["action"])
+            self.countdown = None
+            return f"Отменил: {what}, {self.cfg.address}."
+        if low in CANCEL_WORDS[:4]:
             self.fails.pop(source, None)
             return "Хорошо, отменил." if self.pending.pop(source, None) else "Нечего отменять."
         if source in self.pending:
             answered = self._answer_pending(source, text, low)
             if answered is not None:
                 self.fails.pop(source, None)
+                self._resume_music()
                 return answered
         try:
             reply = self._route(text, low, source)
@@ -74,6 +99,7 @@ class Assistant:
         if reply is None:
             return self._not_understood(text, source)
         self.fails.pop(source, None)
+        self._resume_music()
         return reply
 
     def _not_understood(self, text: str, source: str) -> str:
@@ -81,6 +107,7 @@ class Assistant:
         a = self.cfg.address
         self.store.log_unrecognized(text, source, self.now())
         n = self.fails.get(source, 0) + 1
+        self._pause_music(source)
         if n <= MAX_RETRIES:
             self.fails[source] = n
             if source == "telegram":
@@ -122,6 +149,9 @@ class Assistant:
         if low.startswith("через "):
             p = parse_when(low, now)
             return p.dt if p.dt and p.has_time and not p.text else None
+        m = re.fullmatch(rf"еще\s+({NUM})\s+минут\w*", low)   # «ещё пять минут» — будильник
+        if m:
+            return now + timedelta(minutes=to_int(m.group(1)))
         return None
 
     def _react(self, low: str, source: str) -> str | None:
@@ -132,6 +162,11 @@ class Assistant:
         if not recent:
             return None
         a = self.cfg.address
+        if wait and any(i["kind"] == "alarm" for i in wait) and low in ("хватит", "стоп", "проснулся", "встал", "я проснулся"):
+            for i in wait:
+                self.store.ack(i["id"])
+            self.stop_alarm_sound()
+            return f"Доброе утро, {a}."
         if wait and HEARD.match(low):
             for i in wait:
                 self.store.ack(i["id"])
@@ -166,6 +201,120 @@ class Assistant:
         return self._ask(source, {"kind": "pick_done", "ids": [i["id"] for i in items]},
                          f"Какое именно отметить, {self.cfg.address}? {listing}")
 
+    # ---------- музыка при шуме ----------
+    def _pause_music(self, source: str):
+        """Не поняли фразу в голосовом режиме — ставим играющую музыку на паузу (только через Spotify API,
+        иначе клавиша «пауза» могла бы, наоборот, запустить музыку)."""
+        if self.voice_mode and source == "local" and self.spotify.configured and not self._music_paused:
+            try:
+                self._music_paused = self.spotify.pause_if_playing()
+            except Exception:
+                self._music_paused = False
+
+    def _resume_music(self):
+        if self._music_paused:
+            self._music_paused = False
+            try:
+                self.spotify.resume()
+            except Exception:
+                pass
+
+    # ---------- «не беспокоить» ----------
+    @property
+    def dnd(self) -> bool:
+        return bool(self.store.meta("dnd", False))
+
+    def set_dnd(self, on: bool) -> str:
+        if on:
+            self.store.set_meta("dnd", True)
+            self.store.set_meta("dnd_missed", [])
+            return f"Режим «не беспокоить» включён, {self.cfg.address}."
+        self.store.set_meta("dnd", False)
+        missed = self.store.meta("dnd_missed", []) or []
+        self.store.set_meta("dnd_missed", [])
+        if not missed:
+            return f"Режим «не беспокоить» выключен. Пропущенных напоминаний нет, {self.cfg.address}."
+        return (f"Режим «не беспокоить» выключен. Пока вы не беспокоились, было {len(missed)} "
+                f"{fmt.plural(len(missed), 'напоминание', 'напоминания', 'напоминаний')}, {self.cfg.address}: "
+                + " ".join(missed))
+
+    def note_missed(self, text: str):
+        missed = list(self.store.meta("dnd_missed", []) or [])
+        missed.append(text)
+        self.store.set_meta("dnd_missed", missed[-50:])
+
+    # ---------- опасные действия с отсчётом ----------
+    def start_countdown(self, action: str, source: str) -> str:
+        n = self.cfg.countdown_seconds
+        self.countdown = {"action": action, "due": self.now() + timedelta(seconds=n), "source": source}
+        return (f"Хорошо, {self.cfg.address}. {fmt_action(action).capitalize()} через {n} "
+                f"{fmt.plural(n, 'секунду', 'секунды', 'секунд')}. Скажите «отмена», чтобы остановить.")
+
+    def tick(self, now: datetime) -> list:
+        """Раз в секунду из планировщика: отсчёт опасных действий и повторяющиеся напоминания."""
+        out = []
+        cd = self.countdown
+        if cd and now >= cd["due"]:
+            self.countdown = None
+            try:
+                self.pc.power(cd["action"])
+                out.append(f"Выполняю: {fmt_action(cd['action'])}.")
+            except Exception as e:  # noqa: BLE001
+                out.append(f"Не получилось выполнить: {e}")
+        for r in self.store.recurring_due(now):
+            if self.store.meta("game_mode") or self._dota_running():
+                if "local" in self.pending:
+                    self.store.postpone_recurring(r["id"], now + timedelta(minutes=5))
+                    continue
+                out.append(self._ask("local", {"kind": "match", "id": r["id"], "title": r["title"]},
+                                     f"У вас матч, {self.cfg.address}?"))
+            else:
+                out.append(self.recurring_say(r["title"]))
+        return out
+
+    def recurring_say(self, title: str) -> str:
+        return f"Напоминаю: {title}."
+
+    def _dota_running(self) -> bool:
+        try:
+            return self.pc.os == "Windows" and self.pc.is_running("dota2.exe")
+        except Exception:
+            return False
+
+    # ---------- будильник и таймер ----------
+    def on_alert(self, item: dict, offset: int, now: datetime):
+        """Оповещение по делу сработало: у будильника включаем музыку (или сигнал), у таймера — сигнал."""
+        if item["kind"] == "alarm":
+            played = False
+            if self.spotify.configured:
+                try:
+                    p = self.spotify.find_playlist(self.cfg.alarm_playlist) if self.cfg.alarm_playlist else None
+                    self.spotify.play(context_uri=p["uri"]) if p else self.spotify.resume()
+                    played = True
+                except Exception:
+                    played = False
+            if not played:
+                self._beep()
+            return Urgent(f"Будильник, {self.cfg.address}. Пора вставать." if played
+                          else f"Будильник, {self.cfg.address}. Пора вставать. Музыку включить не удалось, играет сигнал.")
+        if item["kind"] == "timer":
+            self._beep()
+            return Urgent("Таймер: время вышло.")
+        return None
+
+    def _beep(self):
+        try:
+            self.pc.beep(3)
+        except Exception:
+            pass
+
+    def stop_alarm_sound(self):
+        if self.spotify.configured:
+            try:
+                self.spotify.pause_if_playing()
+            except Exception:
+                pass
+
     def _ask(self, source: str, state: dict, question: str) -> str:
         self.pending[source] = {**state, "ts": self.now()}
         return question
@@ -198,6 +347,11 @@ class Assistant:
     def _route(self, text: str, low: str, source: str) -> str:
         if (reaction := self._react(low, source)) is not None:
             return reaction
+        # Явная просьба «в интернете / в Google» важнее ключевых слов вроде «погода» или «курс»
+        if m := re.match(r"^(?:загугли|погугли)\s+(.+)$|^(?:найди|поищи|ищи)\s+в\s+(?:интернете|сети|гугле|гугл)\s+(.+)$", low):
+            return self._search(m.group(1) or m.group(2), source)
+        if (extra := self.x.route(text, low, source)) is not None:
+            return extra
         if re.match(r"^(привет|здравствуй|добрый (день|вечер|утро)|доброе утро)", low):
             who = f", {self.cfg.user_name}" if self.cfg.user_name else ""
             return f"Здравствуйте{who}! Чем могу помочь?"
@@ -215,7 +369,7 @@ class Assistant:
         if re.search(r"заметк|что ты помнишь|что ты запомнил", low):
             return self._notes(low)
         if re.search(r"^(?:что|какие|покажи|скажи|расскажи).*(дел[аоу]?|задач|напоминани|планах|запланирован|график)|"
-                     r"^что у меня (на|в|есть)|"
+                     r"^что у меня|"
                      r"^(список|мои)\s+(дел|задач|напоминани)|что мне (надо|нужно|делать)|что на (сегодня|завтра)", low):
             return self._list(low)
         if m := re.match(r"^(?:я\s+)?(?:готово|выполнено|сделано|сделал|выполнил|отметь(?:\s+как)?\s+(?:выполненн\w+|сделанн\w+))\s*(.*)$", low):
@@ -224,8 +378,6 @@ class Assistant:
             return self._delete(m.group(1))
         if re.search(r"погод", low):
             return self._weather(low)
-        if re.search(r"новост", low):
-            return info.news(self.cfg.news_feeds)
         if re.search(r"который час|сколько времени|скажи время|сколько сейчас", low):
             return f"Сейчас {self.now():%H:%M}."
         if re.search(r"какое (сегодня )?число|какой (сегодня )?день|какая (сегодня )?дата", low):
@@ -301,6 +453,8 @@ class Assistant:
         """Ответ на открытый вопрос. None — это не ответ: разбираем как обычную команду."""
         st = self.pending[source]
         kind = st["kind"]
+        if kind in EXTRA_KINDS:
+            return self.x.answer(kind, st, text, low, source)
         if kind == "review":
             if YES.match(low):
                 del self.pending[source]
@@ -426,10 +580,12 @@ class Assistant:
         return info.weather(city, 2 if "завтра" in low else 1)
 
     def _search(self, q: str, source: str) -> str:
-        res = info.web_search(q)
-        if source == "local" and res is None:
-            return system.search_in_browser(q)
-        return res or f"Для поиска в Telegram установите пакет ddgs. Запрос: {q}"
+        """Решение владельца: «найди …» = открыть Google с запросом (ответ ИИ Google будет на экране, без API)."""
+        from urllib.parse import quote
+        url = "https://www.google.com/search?q=" + quote(q)
+        if source == "local":
+            return self._pc(source, lambda: (self.pc.open_url(url), f"Ищу в Google: {q}.")[1])
+        return info.web_search(q) or f"Ссылка на поиск в Google: {url}"
 
     def _pc(self, source: str, action) -> str:
         if source != "local" and not self.cfg.tg_allow_pc:

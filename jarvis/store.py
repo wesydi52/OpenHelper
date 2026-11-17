@@ -112,6 +112,47 @@ class Store:
                     return True
             return False
 
+    # --- повторяющиеся напоминания («напоминай пить воду каждые два часа») ---
+    def add_recurring(self, title: str, interval_min: int, first: datetime) -> dict:
+        with self._lock:
+            r = {"id": uuid.uuid4().hex[:6], "title": title, "interval_min": interval_min,
+                 "next": first.strftime(TS)}
+            self.data.setdefault("recurring", []).append(r)
+            self._save()
+            return dict(r)
+
+    def recurring(self) -> list:
+        with self._lock:
+            return [dict(r) for r in self.data.get("recurring", [])]
+
+    def recurring_due(self, now: datetime) -> list:
+        """Напоминания, которым пора. Следующий раз — через interval от now (после простоя серией не сыплем)."""
+        with self._lock:
+            out = []
+            for r in self.data.get("recurring", []):
+                if parse_ts(r["next"]) <= now:
+                    out.append(dict(r))
+                    r["next"] = (now + timedelta(minutes=r["interval_min"])).strftime(TS)
+            if out:
+                self._save()
+            return out
+
+    def postpone_recurring(self, rid: str, until: datetime) -> bool:
+        with self._lock:
+            for r in self.data.get("recurring", []):
+                if r["id"] == rid:
+                    r["next"] = until.strftime(TS)
+                    self._save()
+                    return True
+            return False
+
+    def delete_recurring(self, rid: str) -> bool:
+        with self._lock:
+            n = len(self.data.get("recurring", []))
+            self.data["recurring"] = [r for r in self.data.get("recurring", []) if r["id"] != rid]
+            self._save()
+            return len(self.data["recurring"]) < n
+
     # --- реакция владельца на сработавшее напоминание ---
     def awaiting(self, now: datetime, window_min: int = 120) -> list:
         """Дела, о которых Джарвис напомнил и ждёт реакции (не старше window_min минут)."""

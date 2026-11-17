@@ -3,11 +3,12 @@ import json
 import re
 import threading
 
+from .tts import make_engine
+
 
 class Voice:
-    def __init__(self, cfg):
+    def __init__(self, cfg, engine=None):
         try:
-            import pyttsx3
             import speech_recognition as sr
         except ImportError as e:
             raise RuntimeError("Для голоса: pip install SpeechRecognition pyaudio pyttsx3") from e
@@ -25,21 +26,23 @@ class Voice:
         self.offline = self.vosk is not None
         self._lock = threading.Lock()
         self._speaking = threading.Event()
-        self.tts = pyttsx3.init()
-        for v in self.tts.getProperty("voices"):  # ищем русский голос
-            if "ru" in (str(v.id) + str(v.name)).lower() or "russian" in str(v.name).lower():
-                self.tts.setProperty("voice", v.id)
-                break
-        self.tts.setProperty("rate", 175)
+        try:
+            self.engine = engine or make_engine(cfg)
+        except ImportError as e:
+            raise RuntimeError("Для голоса: pip install pyttsx3 (или piper-tts для нейросетевого голоса)") from e
         with self.mic as src:
             self.rec.adjust_for_ambient_noise(src, duration=1)
 
-    def say(self, text: str):
+    def missing_languages(self, needed=("ru", "pl", "uk")) -> list:
+        """Языки новостей, для которых нет голоса, — чтобы подсказать, что доустановить."""
+        have = self.engine.languages()
+        return [lang for lang in needed if lang not in have]
+
+    def say(self, text: str, lang: str = "ru"):
         with self._lock:
             self._speaking.set()
             try:
-                self.tts.say(text)
-                self.tts.runAndWait()
+                self.engine.say(text, lang)
             finally:
                 self._speaking.clear()
 

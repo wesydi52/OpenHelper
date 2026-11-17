@@ -47,20 +47,22 @@ def weather(city: str, days: int = 2) -> str:
     return " ".join(parts)
 
 
-def news(feeds: list, limit: int = 5) -> str:
-    titles = []
-    for url in feeds:
+def news_items(feeds: list, langs: set | None = None, limit: int = 5) -> list:
+    """[(язык, заголовок)] из лент формата «язык|адрес»; langs — какие языки брать (None — все)."""
+    by_lang: dict = {}
+    for spec in feeds:
+        lang, _, url = spec.partition("|") if "|" in spec else ("ru", "", spec)
+        if langs and lang not in langs:
+            continue
         try:
             root = ET.fromstring(_get(url).content)
         except Exception:
             continue
         for item in root.iter("item"):
             t = re.sub(r"\s+", " ", item.findtext("title") or "").strip()
-            if t:
-                titles.append(t)
-            if len(titles) >= limit:
-                return "Главное: " + "; ".join(titles) + "."
-    return ("Главное: " + "; ".join(titles) + ".") if titles else "Не удалось получить новости."
+            if t and len(by_lang.setdefault(lang, [])) < limit:
+                by_lang[lang].append(t)
+    return [(lang, t) for lang, titles in by_lang.items() for t in titles]
 
 
 def web_search(query: str, limit: int = 3) -> str | None:
