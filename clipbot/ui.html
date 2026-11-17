@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipbot</title>
+<style>
+:root{--bg:#0e0f13;--card:#171921;--line:#262a36;--tx:#e8eaf0;--mut:#8b92a5;--ac:#7c5cff;--ok:#2fd27a;--bad:#ff5a67;--warn:#ffb020}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:22px;margin:0}h1 span{color:var(--ac)}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:14px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}
+.run .dot{background:var(--ok);box-shadow:0 0 10px var(--ok);animation:p 1.4s infinite}
+@keyframes p{50%{opacity:.35}}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:820px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+.card h2{margin:0 0 4px;font-size:16px}
+.card .sub{color:var(--mut);font-size:13px;margin:0 0 14px}
+.step{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--ac);font-size:12px;font-weight:700;margin-right:8px}
+label{display:block;font-size:13px;color:var(--mut);margin:12px 0 4px}
+input[type=text],input[type=number],select{width:100%;background:#0e0f13;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px}
+input:focus,select:focus{outline:2px solid var(--ac);border-color:transparent}
+input[type=range]{width:100%;accent-color:var(--ac)}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.chk{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;color:var(--tx);cursor:pointer}
+.chk input{width:18px;height:18px;accent-color:var(--ac)}
+.hint{font-size:12px;color:var(--mut);margin-top:3px}
+.btns{display:flex;gap:10px;margin-top:18px}
+button{border:0;border-radius:10px;padding:12px 18px;font-size:15px;font-weight:600;cursor:pointer;color:#fff;background:var(--ac);flex:1}
+button.stop{background:var(--bad)}button.ghost{background:#262a36;color:var(--tx)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.chk-list div{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
+.ok{color:var(--ok)}.no{color:var(--bad)}.opt{color:var(--warn)}
+canvas{width:100%;height:150px;display:block;background:#0e0f13;border-radius:10px}
+.log{white-space:pre-wrap;height:170px;overflow:auto;background:#0e0f13;border-radius:10px;padding:10px;font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#b8bfd0}
+.clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}
+.clip video{width:100%;aspect-ratio:9/16;background:#000;border-radius:10px;object-fit:cover}
+.clip a{font-size:12px;color:var(--mut);text-decoration:none}
+.empty{color:var(--mut);font-size:14px}
+details{margin-top:14px}summary{cursor:pointer;color:var(--ac);font-weight:600}
+details ol,details ul{color:var(--mut);padding-left:20px;font-size:14px}
+code{background:#0e0f13;padding:1px 6px;border-radius:5px;color:var(--tx)}
+.full{grid-column:1/-1}
+.err{color:var(--bad);font-size:14px;margin-top:10px;min-height:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>Clip<span>bot</span> <small style="color:var(--mut);font-weight:400;font-size:14px">автонарезка клипов из стрима</small></h1>
+    <div id="pill" class="pill"><span class="dot"></span><span id="pilltxt">Остановлено</span></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2><span class="step">1</span>Подключите стрим</h2>
+      <p class="sub">Вставьте ссылку на канал Twitch или его имя. Канал должен быть в эфире.</p>
+      <label for="channel">Канал или ссылка</label>
+      <input id="channel" type="text" placeholder="https://twitch.tv/xqc  или  xqc" autocomplete="off">
+      <div class="chk-list" style="margin-top:14px">
+        <div><span>ffmpeg (резка видео)</span><span id="c_ffmpeg">…</span></div>
+        <div><span>streamlink (запись эфира)</span><span id="c_streamlink">…</span></div>
+        <div><span>whisper (субтитры)</span><span id="c_whisper">…</span></div>
+      </div>
+      <details>
+        <summary>Как подключить стрим — пошагово</summary>
+        <ol>
+          <li>Откройте нужного стримера на twitch.tv и убедитесь, что красная метка <b>LIVE</b> горит.</li>
+          <li>Скопируйте ссылку из адресной строки (например <code>twitch.tv/xqc</code>) и вставьте сюда.</li>
+          <li>Нажмите «Включить» — бот запишет эфир и начнёт слушать чат.</li>
+          <li>Для проверки включите «Пробный клип»: через ~1 минуту получите клип без ожидания всплеска.</li>
+        </ol>
+        <ul>
+          <li>Нужен <b>живой чат</b>: на каналах, где пишут реже 15 сообщений за 10 с, снизьте «Минимум сообщений».</li>
+          <li>Свой стрим можно подключить так же — просто укажите свой канал.</li>
+          <li>Чужие архивы (VOD) не поддерживаются, только прямой эфир.</li>
+        </ul>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">2</span>Настройте клипы</h2>
+      <p class="sub">Можно ничего не менять — значения по умолчанию подходят большинству каналов.</p>
+      <label>Чувствительность: <b id="sensv">средняя</b></label>
+      <input id="sens" type="range" min="1.5" max="5" step="0.5" value="3">
+      <div class="hint">Левее — больше клипов (в том числе слабых), правее — только самые громкие моменты.</div>
+      <div class="row">
+        <div><label for="before">Секунд ДО момента</label><input id="before" type="number" value="20" min="5" max="90"></div>
+        <div><label for="after">Секунд ПОСЛЕ</label><input id="after" type="number" value="10" min="3" max="60"></div>
+      </div>
+      <label for="min_msgs">Минимум сообщений в чате за 10 с</label>
+      <input id="min_msgs" type="number" value="15" min="1">
+      <label class="chk"><input id="vertical" type="checkbox" checked> Вертикальное видео 9:16 (TikTok / Shorts)</label>
+      <label class="chk"><input id="subtitles" type="checkbox"> Субтитры (Whisper, медленнее)</label>
+      <label class="chk"><input id="test_mode" type="checkbox"> Пробный клип через минуту (проверка)</label>
+      <div class="btns">
+        <button id="go">▶ Включить</button>
+        <button id="halt" class="stop" disabled>■ Остановить</button>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+
+    <div class="card">
+      <h2>Активность чата</h2>
+      <p class="sub">Столбик = сообщения за 10 секунд. Жёлтая линия — порог: выше неё бот режет клип.</p>
+      <canvas id="chart" width="520" height="150"></canvas>
+      <div class="hint" id="chartinfo">Нет данных — запустите бота.</div>
+    </div>
+
+    <div class="card">
+      <h2>Журнал</h2>
+      <p class="sub">Что сейчас делает бот.</p>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="card full">
+      <h2>Готовые клипы</h2>
+      <p class="sub">Файлы лежат в папке <code>output/</code> рядом с программой.</p>
+      <div class="clips" id="clips"><span class="empty">Пока нет клипов.</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const sensNames = {1.5:"очень высокая",2:"высокая",2.5:"выше средней",3:"средняя",3.5:"ниже средней",4:"низкая",4.5:"очень низкая",5:"минимальная"};
+const store = {get(k,d){try{return localStorage.getItem(k) ?? d}catch(e){return d}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+$("channel").value = store.get("channel","");
+$("sens").oninput = () => $("sensv").textContent = sensNames[$("sens").value] || $("sens").value;
+$("sens").oninput();
+
+$("go").onclick = async () => {
+  $("err").textContent = "";
+  store.set("channel", $("channel").value);
+  const body = {
+    channel: $("channel").value, sensitivity: $("sens").value,
+    before: $("before").value, after: $("after").value, min_msgs: $("min_msgs").value,
+    vertical: $("vertical").checked, subtitles: $("subtitles").checked, test_mode: $("test_mode").checked
+  };
+  const r = await fetch("/api/start", {method:"POST", body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!j.ok) $("err").textContent = j.error;
+  poll();
+};
+$("halt").onclick = async () => { await fetch("/api/stop", {method:"POST", body:"{}"}); poll(); };
+
+function mark(id, ok, optional){
+  const e = $(id);
+  e.textContent = ok ? "✓ установлено" : (optional ? "не обязательно" : "✗ не найдено");
+  e.className = ok ? "ok" : (optional ? "opt" : "no");
+}
+
+function drawChart(scores, thr){
+  const c = $("chart"), x = c.getContext("2d"), W = c.width, H = c.height;
+  x.clearRect(0,0,W,H);
+  if (!scores.length) return;
+  const max = Math.max(10, ...scores, thr || 0) * 1.15, bw = W / 60;
+  scores.forEach((v,i) => {
+    const h = v / max * (H - 10), hot = thr && v > thr;
+    x.fillStyle = hot ? "#ff5a67" : "#7c5cff";
+    x.fillRect(W - (scores.length - i) * bw + 1, H - h, bw - 2, h);
+  });
+  if (thr){
+    const y = H - thr / max * (H - 10);
+    x.strokeStyle = "#ffb020"; x.setLineDash([6,4]); x.beginPath(); x.moveTo(0,y); x.lineTo(W,y); x.stroke(); x.setLineDash([]);
+  }
+}
+
+let lastClips = "";
+async function poll(){
+  let s;
+  try { s = await (await fetch("/api/status")).json(); } catch(e){ return; }
+  const run = s.running;
+  $("pill").className = "pill" + (run ? " run" : "");
+  $("pilltxt").textContent = run ? "Работает: " + (s.state.channel || "") : "Остановлено";
+  $("go").disabled = run; $("halt").disabled = !run;
+  mark("c_ffmpeg", s.checks.ffmpeg); mark("c_streamlink", s.checks.streamlink); mark("c_whisper", s.checks.whisper, true);
+  drawChart(s.state.scores || [], s.state.threshold);
+  const sc = s.state.scores || [];
+  $("chartinfo").textContent = sc.length
+    ? `Последнее окно: ${sc[sc.length-1]} · Всплесков: ${s.state.spikes || 0}` + (s.state.threshold ? ` · Порог: ${Math.round(s.state.threshold)}` : " · Бот изучает чат…")
+    : "Нет данных — запустите бота.";
+  const lg = $("log"), atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 30;
+  lg.textContent = s.logs.join("\n");
+  if (atEnd) lg.scrollTop = lg.scrollHeight;
+  const key = s.clips.join("|");
+  if (key !== lastClips){
+    lastClips = key;
+    $("clips").innerHTML = s.clips.length ? s.clips.map(f =>
+      `<div class="clip"><video controls preload="metadata" src="/clips/${encodeURIComponent(f)}#t=0.1"></video><a href="/clips/${encodeURIComponent(f)}" download>⬇ ${f}</a></div>`).join("")
+      : '<span class="empty">Пока нет клипов.</span>';
+  }
+}
+poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

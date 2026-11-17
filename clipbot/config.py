@@ -7,6 +7,7 @@ class Config:
     channel: str = "xqc"                 # канал Twitch (без #)
     quality: str = "720p60,720p,best"
     out_dir: str = "output"
+    test_mode: bool = False              # через 45 с записи сделать пробный клип
 
     # детектор: окно подсчёта сообщений чата
     window_sec: int = 10                 # «каждые 10 секунд»

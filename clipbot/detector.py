@@ -15,6 +15,13 @@ class SpikeDetector:
         self.cooldown_windows = cooldown_windows
         self._cooldown = 0
 
+    def threshold(self):
+        """Текущий порог всплеска (None, пока мало истории)."""
+        if len(self.history) < self.min_history:
+            return None
+        return max(mean(self.history) + self.sigma * max(pstdev(self.history), 1.0),
+                   self.min_msgs)
+
     def push(self, count: int) -> bool:
         spike = False
         if self._cooldown > 0:

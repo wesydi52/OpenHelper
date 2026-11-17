@@ -9,9 +9,21 @@
 
 Ограничение: работает только в прямом эфире, прошлые стримы не обработает.
 
+## Меню (рекомендуется)
+
 ```
 pip install -r clipbot/requirements.txt   # + нужен ffmpeg в PATH
-python -m clipbot.main --channel <имя>    # --no-subs, --landscape, --out DIR
+python -m clipbot                         # откроется http://127.0.0.1:8765
+```
+
+В меню: вставьте ссылку на канал Twitch (`twitch.tv/xqc` или просто `xqc`) → при желании
+подвигайте чувствительность → «Включить». Для проверки отметьте «Пробный клип через минуту».
+Меню видно только на вашем компьютере. Готовые клипы смотрятся прямо в нём и лежат в `output/`.
+
+## Без меню
+
+```
+python -m clipbot.main --channel <имя>    # --no-subs, --landscape, --test, --out DIR
 python -m pytest clipbot
 ```
 
