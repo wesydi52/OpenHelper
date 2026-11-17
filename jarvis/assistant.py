@@ -24,6 +24,13 @@ MODAL = re.compile(r"\b(надо|нужно|необходимо|не забыт
 
 PENDING_TTL = timedelta(minutes=2)   # открытый вопрос «протухает», чтобы не перехватывать чужие фразы
 MAX_RETRIES = 2                      # сколько раз переспросить, прежде чем сдаться
+REACT_WINDOW_MIN = 120               # столько минут после напоминания слова «сделано/позже» относятся к нему
+SNOOZE_DEFAULT = timedelta(minutes=30)   # «позже» / «потом» без времени — решение владельца
+HEARD = re.compile(r"^(?:хорошо|понял[аи]?|понятно|принято|услышал[аи]?|ясно|ок|окей|ладно)$")
+DONE = re.compile(r"^(?:я\s+)?(?:уже\s+)?(?:все\s+)?(?:готово|сделано|сделал[аи]?|выполнено|выполнил[аи]?|закончил[аи]?)$")
+PAST = re.compile(r"^[а-я]{2,}(?:л|ла|ло|ли|лся|лась|лись)$")   # глагол прошедшего времени: «позвонил»
+SNOOZE_WORDS = ("позже", "потом", "попозже", "отложи", "отложить", "не сейчас")
+ORDINALS = {"первое": 1, "первый": 1, "второе": 2, "второй": 2, "третье": 3, "третий": 3}
 YES = re.compile(r"^(?:да|давай|разберем|разберём|конечно|ага|угу|можно)\b")
 NO = re.compile(r"^(?:нет|не сейчас|потом|позже|не надо|не нужно)\b")
 
@@ -85,6 +92,80 @@ class Assistant:
             msg += " Вы можете написать её мне в Telegram."
         return msg
 
+    # ---------- реакция на сработавшее напоминание ----------
+    @staticmethod
+    def _verb_matches(verb: str, title: str) -> bool:
+        """«позвонил» ↔ «Позвонить врачу»: у глагола и слова из названия общее начало."""
+        for w in re.findall(r"[а-я]{4,}", title.lower().replace("ё", "е")):
+            n = 0
+            while n < min(len(verb), len(w)) and verb[n] == w[n]:
+                n += 1
+            if n >= max(4, min(len(verb), len(w)) - 3):
+                return True
+        return False
+
+    def _snooze_until(self, low: str, now: datetime):
+        """None — это не просьба отложить; иначе момент повтора (может оказаться в прошлом)."""
+        if low in SNOOZE_WORDS:
+            return now + SNOOZE_DEFAULT
+        m = re.match(r"^отложи(?:ть)?(?:\s+(?:это|напоминание))?\s+на\s+(.+)$", low)
+        if m:
+            p = parse_when("через " + m.group(1), now)
+            return p.dt if p.dt and not p.text else None
+        m = re.match(r"^напомни(?:ть)?(?:\s+мне)?(\s+еще\s+раз)?\s*(.*)$", low)
+        if m and (m.group(1) or m.group(2)):
+            rest = m.group(2).strip()
+            if rest in ("", "позже", "потом", "попозже"):
+                return now + SNOOZE_DEFAULT
+            p = parse_when(rest, now)
+            return p.dt if p.dt and p.has_time and not p.text and not p.ask else None
+        if low.startswith("через "):
+            p = parse_when(low, now)
+            return p.dt if p.dt and p.has_time and not p.text else None
+        return None
+
+    def _react(self, low: str, source: str) -> str | None:
+        """Слова «сделано / понял / отложи» после напоминания. None — это не реакция."""
+        now = self.now()
+        wait = self.store.awaiting(now, REACT_WINDOW_MIN)    # ждём «понял» / «отложи»
+        recent = self.store.recent(now, REACT_WINDOW_MIN)    # можно закрыть: «сделано», «я уже позвонил»
+        if not recent:
+            return None
+        a = self.cfg.address
+        if wait and HEARD.match(low):
+            for i in wait:
+                self.store.ack(i["id"])
+            return f"Принял, {a}. Дело остаётся в списке."
+        if DONE.match(low):
+            return self._done_among(source, recent)
+        until = self._snooze_until(low, now) if wait else None
+        if until is not None:
+            if until <= now:
+                return f"Это время уже прошло, {a}. Назовите другое."
+            for i in wait:
+                self.store.snooze(i["id"], until)
+            titles = "; ".join(i["title"] for i in wait)
+            return f"Напомню {fmt.fmt_when(until, now, True)}: {titles}."
+        words = low.split()
+        if len(words) <= 4:  # «я уже позвонил» — закрыть дело по смыслу
+            verb = next((w for w in words if PAST.match(w) and not HEARD.match(w)), None)  # «понял» — не «сделал»
+            if verb:
+                hits = [i for i in recent if self._verb_matches(verb, i["title"])]
+                if hits:
+                    return self._done_among(source, hits)
+                if len(recent) == 1:
+                    return self._ask(source, {"kind": "confirm_done", "id": recent[0]["id"]},
+                                     f"Отметить «{recent[0]['title']}» выполненным, {a}?")
+        return None
+
+    def _done_among(self, source: str, items: list) -> str:
+        if len(items) == 1:
+            self.store.mark_done(items[0]["id"])
+            return f"Отметил выполненным: {items[0]['title']}."
+        listing = " ".join(f"{n}. {i['title']}." for n, i in enumerate(items, 1))
+        return self._ask(source, {"kind": "pick_done", "ids": [i["id"] for i in items]},
+                         f"Какое именно отметить, {self.cfg.address}? {listing}")
+
     def _ask(self, source: str, state: dict, question: str) -> str:
         self.pending[source] = {**state, "ts": self.now()}
         return question
@@ -115,6 +196,8 @@ class Assistant:
         return voice, tg
 
     def _route(self, text: str, low: str, source: str) -> str:
+        if (reaction := self._react(low, source)) is not None:
+            return reaction
         if re.match(r"^(привет|здравствуй|добрый (день|вечер|утро)|доброе утро)", low):
             who = f", {self.cfg.user_name}" if self.cfg.user_name else ""
             return f"Здравствуйте{who}! Чем могу помочь?"
@@ -226,6 +309,31 @@ class Assistant:
                 del self.pending[source]
                 return f"Хорошо, {self.cfg.address}."
             return None
+        if kind == "confirm_done":
+            if YES.match(low):
+                del self.pending[source]
+                title = next((i["title"] for i in self.store.active() if i["id"] == st["id"]), "")
+                self.store.mark_done(st["id"])
+                return f"Отметил выполненным: {title}."
+            if NO.match(low):
+                del self.pending[source]
+                return f"Хорошо, {self.cfg.address}."
+            return None
+        if kind == "pick_done":
+            by_id = {i["id"]: i for i in self.store.active()}
+            cands = [by_id[x] for x in st["ids"] if x in by_id]   # порядок — как зачитан в вопросе
+            n = ORDINALS.get(low) or (to_int(low) if re.fullmatch(NUM, low) else 0)
+            if 1 <= n <= len(cands):
+                pick = cands[n - 1]
+            else:
+                words = [w[:5] for w in re.findall(r"\w{3,}", low)]
+                hits = [i for i in cands if words and all(w in i["title"].lower() for w in words)]
+                if len(hits) != 1:
+                    return None
+                pick = hits[0]
+            del self.pending[source]
+            self.store.mark_done(pick["id"])
+            return f"Отметил выполненным: {pick['title']}."
         if kind == "time":
             p = parse_when(text, self.now())
             if p.dt is None:

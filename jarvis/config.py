@@ -33,6 +33,8 @@ class Config:
     # Telegram
     tg_token: str = field(default_factory=lambda: os.environ.get("JARVIS_TG_TOKEN", ""))
     tg_owner: str = field(default_factory=lambda: os.environ.get("JARVIS_TG_OWNER", ""))
+    # Через сколько минут без реакции на ПК продублировать напоминание в Telegram
+    tg_dup_minutes: int = field(default_factory=lambda: int(os.environ.get("JARVIS_TG_DUP_MINUTES", "15")))
     tg_allow_pc: bool = field(default_factory=lambda: os.environ.get("JARVIS_TG_ALLOW_PC") == "1")
     # Почта (IMAP). Для Gmail нужен «пароль приложения».
     mail_user: str = field(default_factory=lambda: os.environ.get("JARVIS_MAIL_USER", ""))

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 TS = "%Y-%m-%d %H:%M"
+SNOOZE_OFFSET = -1   # признак повторного оповещения после «отложи»
 
 
 def parse_ts(v: str) -> datetime:
@@ -105,9 +106,64 @@ class Store:
             for i in self.data["items"]:
                 if i["id"] == item_id:
                     i["done"] = True
+                    i["awaiting"] = None
+                    i["snooze_until"] = None
                     self._save()
                     return True
             return False
+
+    # --- реакция владельца на сработавшее напоминание ---
+    def awaiting(self, now: datetime, window_min: int = 120) -> list:
+        """Дела, о которых Джарвис напомнил и ждёт реакции (не старше window_min минут)."""
+        with self._lock:
+            out = []
+            for i in self.data["items"]:
+                ts = i.get("awaiting")
+                if i["done"] or not ts:
+                    continue
+                if now - parse_ts(ts) <= timedelta(minutes=window_min):
+                    out.append(dict(i))
+            return sorted(out, key=lambda i: i["awaiting"])
+
+    def recent(self, now: datetime, window_min: int = 120) -> list:
+        """Дела, о которых недавно напоминали — даже если владелец уже сказал «понял».
+        По ним можно закрыть дело словами «я уже позвонил»."""
+        with self._lock:
+            out = []
+            for i in self.data["items"]:
+                ts = i.get("alerted") or i.get("awaiting")   # старые данные: поля alerted нет
+                if i["done"] or not ts:
+                    continue
+                if now - parse_ts(ts) <= timedelta(minutes=window_min):
+                    out.append(dict(i, alerted=ts))
+            return sorted(out, key=lambda i: i["alerted"])
+
+    def _update(self, item_id: str, **fields) -> bool:
+        with self._lock:
+            for i in self.data["items"]:
+                if i["id"] == item_id:
+                    i.update(fields)
+                    self._save()
+                    return True
+            return False
+
+    def ack(self, item_id: str) -> bool:
+        """«Понял»: дело остаётся активным, но это напоминание больше не повторяется и не дублируется."""
+        return self._update(item_id, awaiting=None, tg_dup=False)
+
+    def snooze(self, item_id: str, until: datetime) -> bool:
+        """Отложить: напомнить ещё раз в момент until."""
+        return self._update(item_id, awaiting=None, tg_dup=False, snooze_until=until.strftime(TS))
+
+    def unacked(self, now: datetime, minutes: int) -> list:
+        """Дела без реакции дольше minutes минут, которые ещё не дублировались в Telegram."""
+        with self._lock:
+            return [dict(i) for i in self.data["items"]
+                    if not i["done"] and i.get("awaiting") and not i.get("tg_dup")
+                    and now - parse_ts(i["awaiting"]) >= timedelta(minutes=minutes)]
+
+    def mark_tg_dup(self, item_id: str) -> bool:
+        return self._update(item_id, tg_dup=True)
 
     def delete_item(self, item_id: str) -> bool:
         with self._lock:
@@ -124,14 +180,22 @@ class Store:
         """
         with self._lock:
             out = []
+            stamp = now.strftime(TS)
             for i in self.data["items"]:
                 if i["done"] or not i["when"]:
                     continue
                 when = parse_ts(i["when"])
                 hit = [a for a in i["alerts"] if a not in i["fired"] and when - timedelta(minutes=a) <= now]
+                snooze = i.get("snooze_until")
                 if hit:
                     i["fired"].extend(hit)
+                    i["snooze_until"] = None   # плановое оповещение важнее отложенного
+                    i["awaiting"], i["alerted"], i["tg_dup"] = stamp, stamp, False
                     out.append((dict(i), min(hit)))
+                elif snooze and parse_ts(snooze) <= now:
+                    i["snooze_until"] = None
+                    i["awaiting"], i["alerted"], i["tg_dup"] = stamp, stamp, False
+                    out.append((dict(i), SNOOZE_OFFSET))   # «Повторяю: …»
             if out:
                 self._save()
             return out

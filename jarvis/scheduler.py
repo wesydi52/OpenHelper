@@ -3,15 +3,18 @@ import threading
 from datetime import datetime
 from typing import Callable
 
-from .fmt import alert_text
+from .fmt import alert_text, unacked_text
 
 
 class Scheduler(threading.Thread):
     def __init__(self, store, notify: Callable[[str], None], interval: float = 10.0,
                  review: Callable[[datetime], tuple | None] | None = None,
-                 notify_tg: Callable[[str], None] | None = None):
+                 notify_tg: Callable[[str], None] | None = None,
+                 tg_dup_minutes: int | None = None):
         super().__init__(daemon=True)
         self.store, self.notify, self.interval = store, notify, interval
+        # Если на ПК не отреагировали за столько минут — продублировать напоминание в Telegram
+        self.tg_dup_minutes = tg_dup_minutes
         self.review, self.notify_tg = review, notify_tg  # ежедневная сводка непонятных фраз
         self._stop_evt = threading.Event()
 
@@ -19,6 +22,10 @@ class Scheduler(threading.Thread):
         now = now or datetime.now()
         for item, offset in self.store.due(now):
             self.notify(alert_text(item, offset, now))
+        if self.notify_tg and self.tg_dup_minutes:
+            for item in self.store.unacked(now, self.tg_dup_minutes):
+                self.notify_tg(unacked_text(item))
+                self.store.mark_tg_dup(item["id"])
         if self.review and (r := self.review(now)):
             voice_text, tg_list = r
             self.notify(voice_text)          # консоль + голос (+ Telegram, если включён)

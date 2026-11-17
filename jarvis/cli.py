@@ -45,13 +45,15 @@ def main(argv=None):
             voice.say(text)
 
     def notify(text: str):
-        """Оповещение по всем включённым каналам: консоль, голос на ПК, Telegram."""
+        """Оповещение на ПК: консоль и голос. В Telegram оно уходит только как дубль, если на ПК
+        не ответили за tg_dup_minutes. Без ПК (--headless) слушать некому — шлём в Telegram сразу."""
         say(text, "🔔 ")
-        if bot:
+        if bot and args.headless:
             bot.send(text)
 
     sched = Scheduler(store, notify, review=assistant.daily_review,
-                      notify_tg=bot.send if bot else None)
+                      notify_tg=bot.send if bot else None,
+                      tg_dup_minutes=None if args.headless else cfg.tg_dup_minutes)
     sched.start()
     if bot:
         bot.start()

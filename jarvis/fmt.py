@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from .ruparse import MONTHS
-from .store import parse_ts
+from .store import SNOOZE_OFFSET, parse_ts
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -33,9 +33,16 @@ def fmt_when(dt: datetime, now: datetime, with_time: bool = True) -> str:
     return f"{day} в {dt:%H:%M}" if with_time else day
 
 
+def unacked_text(item: dict) -> str:
+    """Дубль в Telegram, если на ПК не ответили."""
+    return f"Напоминание без ответа: {item['title']} (сработало в {parse_ts(item['awaiting']):%H:%M})."
+
+
 def alert_text(item: dict, offset: int, now: datetime) -> str:
     when = parse_ts(item["when"])
     title = item["title"]
+    if offset == SNOOZE_OFFSET:
+        return f"Повторяю: {title}."
     if now - when > timedelta(minutes=5):
         return f"Пропущенное напоминание: {title}. Время было {fmt_when(when, now)}."
     if item["kind"] == "reminder":
