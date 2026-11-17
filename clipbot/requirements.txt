@@ -1,0 +1,3 @@
+streamlink
+faster-whisper
+pytest
