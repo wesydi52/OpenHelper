@@ -16,7 +16,7 @@ class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = threading.RLock()
-        self.data = {"notes": [], "items": [], "meta": {}}
+        self.data = {"notes": [], "items": [], "meta": {}, "unrecognized": []}
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -56,6 +56,33 @@ class Store:
             self.data["notes"] = [x for x in self.data["notes"] if x["id"] != note_id]
             self._save()
             return len(self.data["notes"]) < n
+
+    # --- журнал нераспознанных фраз (только текст; аудио не сохраняется) ---
+    UNRECOGNIZED_LIMIT = 1000
+
+    def log_unrecognized(self, text: str, source: str, when: datetime) -> None:
+        with self._lock:
+            log = self.data.setdefault("unrecognized", [])
+            log.append({"ts": when.strftime(TS), "text": text, "source": source, "reviewed": False})
+            del log[:-self.UNRECOGNIZED_LIMIT]
+            self._save()
+
+    def unrecognized(self, only_new: bool = True) -> list:
+        with self._lock:
+            return [dict(x) for x in self.data.get("unrecognized", []) if not (only_new and x["reviewed"])]
+
+    def mark_unrecognized_reviewed(self) -> None:
+        with self._lock:
+            for x in self.data.get("unrecognized", []):
+                x["reviewed"] = True
+            self._save()
+
+    def clear_unrecognized(self) -> int:
+        with self._lock:
+            n = len(self.data.get("unrecognized", []))
+            self.data["unrecognized"] = []
+            self._save()
+            return n
 
     # --- задачи (kind=task, срок необязателен) и напоминания (kind=reminder) ---
     def add_item(self, kind: str, title: str, when: datetime | None, alerts: list | None = None) -> dict:

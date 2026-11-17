@@ -63,6 +63,10 @@ class Parsed:
     text: str
     dt: datetime | None
     has_time: bool
+    # Нужно уточнить у владельца: "weekend" | "next_week_day" | "month_day" (dt в этом случае None)
+    ask: str | None = None
+    # Время суток из фразы («в выходные в 10»), если оно названо; нужно при уточнении даты
+    tm: time | None = None
 
 
 def _apply_mer(h: int, mer: str | None) -> int:
@@ -113,6 +117,12 @@ def parse_when(text: str, now: datetime | None = None) -> Parsed:
         delta = timedelta(minutes=30)
     elif scan(r"\bчерез\s+полтора\s+часа\b"):
         delta = timedelta(minutes=90)
+    elif scan(r"\bчерез\s+пару\s+часов\b"):
+        delta = timedelta(minutes=150)  # «около 2–3 часов» — по решению владельца 2,5 часа
+    elif scan(r"\bчерез\s+пару\s+минут\b"):
+        delta = timedelta(minutes=2)
+    elif scan(r"\bчерез\s+пару\s+(?:дней|дня)\b"):
+        target = now.date() + timedelta(days=2)
     else:
         for m, _ in scan(rf"\bчерез\s+(?:({NUM})\s+)?(секунд\w*|минут\w*|час\w*|ден\w*|дн\w*|недел\w*|месяц\w*)\b"):
             n = to_int(m.group(1)) if m.group(1) else 1
@@ -162,17 +172,36 @@ def parse_when(text: str, now: datetime | None = None) -> Parsed:
         target = d
     for m, _ in scan(PRE + r"(полдень|полночь)\b"):
         hm = (12 if m.group(1) == "полдень" else 0, 0, None)
+    # расплывчатые части дня (значения назвал владелец)
+    for pat, hour in ((r"\bпосле\s+обеда\b", 15), (r"\bпод\s+вечер\b", 17),
+                      (PRE + r"(?:обеденное\s+время|обед)\b", 13)):
+        if scan(pat) and hm is None:
+            hm = (hour, 0, None)
+
+    ask = None
+    # «в начале месяца» — 1 число ближайшего следующего месяца; остальное спрашиваем
+    if scan(PRE + r"начале\s+месяца\b"):
+        target = date(now.year + (now.month == 12), now.month % 12 + 1, 1)
+    if scan(PRE + r"(?:конц[аеу]\s+месяца|этом\s+месяце)\b"):
+        ask = "month_day"
+    if scan(PRE + r"выходн\w+\b"):
+        ask = "weekend"
+    nextweek = bool(scan(r"\bна\s+следующей\s+неделе\b"))
 
     # --- дни ---
     for m, _ in scan(PRE + r"(?:(следующ\w+|эту|этот)\s+)?"
                      r"(понедельник\w*|вторник\w*|сред[ауы]\b|четверг\w*|пятниц\w*|суббот\w*|воскресень\w*)"):
         wd = next(i for stem, i in WEEKDAYS if m.group(2).startswith(stem))
-        if m.group(1) and m.group(1).startswith("следующ"):
+        if nextweek or (m.group(1) and m.group(1).startswith("следующ")):
             monday = now.date() - timedelta(days=now.weekday())
             target = monday + timedelta(days=7 + wd)
         else:
             target = now.date() + timedelta(days=(wd - now.weekday()) % 7 or 7)
+        ask = None  # день названо явно — уточнять нечего
+        nextweek = False
         break
+    if nextweek:
+        ask = "next_week_day"
     for m, _ in scan(PRE + r"(сегодня|послезавтра|завтра)\b"):
         target = now.date() + timedelta(days={"сегодня": 0, "завтра": 1, "послезавтра": 2}[m.group(1)])
         break
@@ -202,30 +231,80 @@ def parse_when(text: str, now: datetime | None = None) -> Parsed:
         daypart = m.group(1)
 
     # --- сборка ---
-    if delta is None and target is None and hm is None and daypart is None:
+    if target is not None:
+        ask = None  # дата названа явно — уточнять нечего
+    if delta is None and target is None and hm is None and daypart is None and ask is None:
         return Parsed(_tidy(text, []), None, False)
 
     part_mer = {"утром": "утра", "с утра": "утра", "днем": "дня", "вечером": "вечера", "ночью": "ночи"}
     part_default = {"утром": 9, "с утра": 9, "днем": 14, "вечером": 19, "ночью": 23}
+    tm = None
+    if hm:
+        h, mn, mer = hm
+        if word_form and target is None and ask is None and not daypart and not mer and 1 <= h <= 7:
+            mer = "дня"  # «в шесть» без даты — скорее вечер, а не 6 утра
+        mer = mer or (part_mer.get(re.sub(r"\s+", " ", daypart)) if daypart else None)
+        tm = time(_apply_mer(h, mer) % 24, mn)
+    elif daypart:
+        tm = time(part_default[re.sub(r"\s+", " ", daypart)], 0)
+
     if delta is not None:
-        dt, has_time = now + delta, True
+        return Parsed(_tidy(text, spans), now + delta, True)
+    if ask and target is None:
+        return Parsed(_tidy(text, spans), None, False, ask, tm)
+    dt = datetime.combine(target or now.date(), tm or time(0, 0))
+    if tm is not None and target is None and dt <= now:
+        dt += timedelta(days=1)  # ближайшее такое время — завтра
+    return Parsed(_tidy(text, spans), dt, tm is not None)
+
+
+def _weekday_of(text: str) -> int | None:
+    m = re.search(r"(понедельник\w*|вторник\w*|сред[ауы]\b|четверг\w*|пятниц\w*|суббот\w*|воскресень\w*)", text)
+    return next(i for stem, i in WEEKDAYS if m.group(1).startswith(stem)) if m else None
+
+
+def _day_of_month(low: str, now: datetime) -> date | None:
+    """Ответ на «Какого числа?»: «28», «двадцать восьмого», «30 числа» → ближайшая такая дата."""
+    m = re.fullmatch(rf"\s*(?:до\s+|на\s+)?({DAY}|{NUM})\s*(?:числа)?\s*", low)
+    if not m:
+        return None
+    day = to_int(m.group(1))
+    if not 1 <= day <= 31:
+        return None
+    for add in range(0, 13):
+        y, mo = now.year + (now.month - 1 + add) // 12, (now.month - 1 + add) % 12 + 1
+        try:
+            c = date(y, mo, day)
+        except ValueError:
+            continue  # в этом месяце нет такого числа
+        if c >= now.date():
+            return c
+    return None
+
+
+def resolve_ask(kind: str, answer: str, now: datetime | None = None, tm: time | None = None) -> Parsed | None:
+    """Разбор ответа владельца на уточняющий вопрос. None — это не ответ на вопрос."""
+    now = now or datetime.now()
+    low = answer.lower().replace("ё", "е")
+    p = parse_when(answer, now)
+    if kind == "weekend":
+        wd = _weekday_of(low)
+        if wd not in (5, 6):
+            return None
+        d = now.date() + timedelta(days=(wd - now.weekday()) % 7 or 7)
+    elif kind == "next_week_day":
+        wd = _weekday_of(low)
+        if wd is None:
+            return None
+        d = now.date() - timedelta(days=now.weekday()) + timedelta(days=7 + wd)
+    elif kind == "month_day":
+        d = p.dt.date() if p.dt else _day_of_month(low, now)
+        if d is None:
+            return None
     else:
-        has_time = False
-        tm = time(0, 0)
-        if hm:
-            h, mn, mer = hm
-            if word_form and target is None and not daypart and not mer and 1 <= h <= 7:
-                mer = "дня"  # «в шесть» без даты — скорее вечер, а не 6 утра
-            mer = mer or (part_mer.get(re.sub(r"\s+", " ", daypart)) if daypart else None)
-            tm, has_time = time(_apply_mer(h, mer) % 24, mn), True
-        elif daypart:
-            tm, has_time = time(part_default[re.sub(r"\s+", " ", daypart)], 0), True
-        explicit_date = target is not None
-        d = target or now.date()
-        dt = datetime.combine(d, tm)
-        if has_time and not explicit_date and dt <= now:
-            dt += timedelta(days=1)  # ближайшее такое время — завтра
-    return Parsed(_tidy(text, spans), dt, has_time)
+        return None
+    t = p.dt.time() if (p.dt and p.has_time) else tm
+    return Parsed("", datetime.combine(d, t or time(0, 0)), t is not None)
 
 
 def _tidy(text: str, spans) -> str:

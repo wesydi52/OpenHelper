@@ -3,10 +3,10 @@
 handle(text, source) -> ответ (строка). source: "local" (ПК, голос/консоль) или "telegram".
 """
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from . import fmt
-from .ruparse import NUM, parse_when, to_int
+from .ruparse import NUM, parse_when, resolve_ask, to_int
 from .skills import info, mail, system
 
 HELP = ("Умею: запоминать дела со сроком («запомни, что мне надо сдать отчёт до пятницы 18:00»), "
@@ -15,11 +15,17 @@ HELP = ("Умею: запоминать дела со сроком («запом
         "(«запомни, что пароль от вайфая 1234», «покажи заметки»), говорить погоду, новости, время, "
         "проверять почту, открывать программы и сайты, менять громкость, искать в интернете.")
 
-CMD_PREFIX = (r"^(?:(?:пожалуйста|слушай|эй)[, ]+)?(?:запомни|запиши|добавь(?:\s+(?:задачу|дело|напоминание))?|"
+CMD_PREFIX = (r"^(?:(?:пожалуйста|слушай|эй)[, ]+)?(?:запомни|запиши(?:\s+в\s+(?:дела|задачи|список\s+дел))?|"
+              r"добавь(?:\s+(?:задачу|дело|напоминание)|\s+в\s+(?:дела|задачи|список\s+дел))?|"
               r"напомни(?:ть)?|поставь\s+напоминание|создай\s+(?:задачу|напоминание))\b[ ,:]*")
 FILLER = (r"^(?:(?:о том|про то)[, ]*)?(?:что\s+)?(?:мне\s+)?"
           r"(?:надо\s+бы|нужно\s+бы|надо|нужно|необходимо|не\s+забыть|я\s+должен|должен|обязательно)\b[ ,]*")
 MODAL = re.compile(r"\b(надо|нужно|необходимо|не забыть|должен|обязательно)\b")
+
+PENDING_TTL = timedelta(minutes=2)   # открытый вопрос «протухает», чтобы не перехватывать чужие фразы
+MAX_RETRIES = 2                      # сколько раз переспросить, прежде чем сдаться
+YES = re.compile(r"^(?:да|давай|разберем|разберём|конечно|ага|угу|можно)\b")
+NO = re.compile(r"^(?:нет|не сейчас|потом|позже|не надо|не нужно)\b")
 
 
 def _clean_task(text: str) -> str:
@@ -35,6 +41,7 @@ class Assistant:
     def __init__(self, cfg, store, now=datetime.now):
         self.cfg, self.store, self.now = cfg, store, now
         self.pending: dict = {}  # source -> уточняющий вопрос
+        self.fails: dict = {}    # source -> сколько раз подряд не поняли
 
     # ---------- вход ----------
     def handle(self, text: str, source: str = "local") -> str:
@@ -42,16 +49,70 @@ class Assistant:
         if not text:
             return ""
         low = text.lower().replace("ё", "е").strip(" .!?")
+        st = self.pending.get(source)
+        if st and self.now() - st["ts"] > PENDING_TTL:
+            del self.pending[source]
         if low in ("отмена", "отмени", "забудь", "неважно"):
+            self.fails.pop(source, None)
             return "Хорошо, отменил." if self.pending.pop(source, None) else "Нечего отменять."
         if source in self.pending:
-            answered = self._answer_pending(source, text)
+            answered = self._answer_pending(source, text, low)
             if answered is not None:
+                self.fails.pop(source, None)
                 return answered
         try:
-            return self._route(text, low, source)
+            reply = self._route(text, low, source)
         except Exception as e:  # сеть, диск и т.п. — отвечаем, а не падаем
             return f"Не получилось выполнить: {e}"
+        if reply is None:
+            return self._not_understood(text, source)
+        self.fails.pop(source, None)
+        return reply
+
+    def _not_understood(self, text: str, source: str) -> str:
+        """Раздел 2a плана: официально, два переспроса, затем сдаться и записать фразу для разбора."""
+        a = self.cfg.address
+        self.store.log_unrecognized(text, source, self.now())
+        n = self.fails.get(source, 0) + 1
+        if n <= MAX_RETRIES:
+            self.fails[source] = n
+            if source == "telegram":
+                return f"Прошу прощения, {a}, я не понял команду. Не могли бы вы сформулировать иначе?"
+            return f"Прошу прощения, {a}, я не расслышал. Не могли бы вы повторить?"
+        self.fails.pop(source, None)
+        msg = f"Прошу прощения, {a}, мне не удалось разобрать команду. Я записал фразу для разбора."
+        if source != "telegram" and self.cfg.tg_token:
+            msg += " Вы можете написать её мне в Telegram."
+        return msg
+
+    def _ask(self, source: str, state: dict, question: str) -> str:
+        self.pending[source] = {**state, "ts": self.now()}
+        return question
+
+    # ---------- журнал непонятных фраз ----------
+    def _list_unrecognized(self) -> str:
+        items = self.store.unrecognized()
+        if not items:
+            return f"Непонятных фраз нет, {self.cfg.address}."
+        self.store.mark_unrecognized_reviewed()  # показали — считаем разобранными (данные остаются в журнале)
+        return f"Непонятных фраз: {len(items)}. " + ". ".join(
+            f"{n}. «{x['text']}»" for n, x in enumerate(items, 1)) + "."
+
+    def daily_review(self, now: datetime) -> tuple[str, str] | None:
+        """Раз в день после review_time: (реплика голосом, полный список для Telegram) или None."""
+        hh, mm = (int(x) for x in self.cfg.review_time.split(":"))
+        items = self.store.unrecognized()
+        today = now.strftime("%Y-%m-%d")
+        if (not items or now.time() < time(hh, mm) or self.store.meta("review_prompted") == today
+                or "local" in self.pending):
+            return None
+        self.store.set_meta("review_prompted", today)
+        n = len(items)
+        verb = "Накопилась" if n % 10 == 1 and n % 100 != 11 else "Накопилось"
+        voice = f"{verb} {fmt.unclear_phrases(n)}, {self.cfg.address}. Разберём?"
+        self._ask("local", {"kind": "review"}, voice)
+        tg = "Непонятные фразы:\n" + "\n".join(f"{i}. {x['text']}" for i, x in enumerate(items, 1))
+        return voice, tg
 
     def _route(self, text: str, low: str, source: str) -> str:
         if re.match(r"^(привет|здравствуй|добрый (день|вечер|утро)|доброе утро)", low):
@@ -59,6 +120,11 @@ class Assistant:
             return f"Здравствуйте{who}! Чем могу помочь?"
         if re.search(r"что ты умеешь|помощь|help|команды", low):
             return HELP
+        if re.search(r"(?:непонятн|нераспознанн)\w*\s+фраз|журнал\w*\s+(?:непонятн|нераспознанн)", low):
+            if re.search(r"очист|сотри|удали|сбрось", low):
+                n = self.store.clear_unrecognized()
+                return f"Журнал очистил, {self.cfg.address}. Удалено записей: {n}."
+            return self._list_unrecognized()
         if m := re.match(CMD_PREFIX, low):
             return self._add(text[m.end():], low[:m.end()], source)
         if re.search(r"\b(спасибо|благодарю)\b", low):
@@ -93,7 +159,7 @@ class Assistant:
                             else system.open_app(m.group(1)))
         if m := re.search(r"громкост\w*.*?(\d{1,3}|" + NUM + ")", low):
             return self._pc(source, lambda: system.set_volume(to_int(m.group(1))))
-        return "Не понял команду. Скажите «что ты умеешь»."
+        return None  # не поняли — handle() переспросит или сдастся
 
     # ---------- задачи и напоминания ----------
     def _add(self, body: str, prefix: str, source: str) -> str:
@@ -101,20 +167,30 @@ class Assistant:
         body = body.strip()
         if not body:
             return "Что именно запомнить?"
-        now = self.now()
-        p = parse_when(body, now)
+        p = parse_when(body, self.now())
         task = _clean_task(p.text)
-        is_task = verb == "напомни" or p.dt is not None or bool(MODAL.search(body.lower()))
+        is_task = verb == "напомни" or p.dt is not None or p.ask is not None or bool(MODAL.search(body.lower()))
         if not is_task:  # «запомни, что пароль 1234» — просто заметка
             self.store.add_note(_clean_task(body))
             return "Запомнил."
         if not task:
-            self.pending[source] = {"kind": "text", "when": p.dt, "has_time": p.has_time, "verb": verb}
-            return "О чём напомнить?"
+            return self._ask(source, {"kind": "text", "p": p, "verb": verb}, f"О чём напомнить, {self.cfg.address}?")
+        return self._schedule(source, task, p, verb)
+
+    def _schedule(self, source: str, task: str, p, verb: str) -> str:
+        """Есть название дела; дальше — спросить недостающее или создать."""
+        a = self.cfg.address
+        if p.ask:
+            if p.ask == "weekend":
+                q = f"В субботу или в воскресенье, {a}" + ("?" if p.tm else ", и во сколько?")
+            elif p.ask == "next_week_day":
+                q = f"Какого дня недели, {a}?"
+            else:
+                q = f"Какого числа, {a}?"
+            return self._ask(source, {"kind": "ask", "ask": p.ask, "title": task, "verb": verb, "tm": p.tm}, q)
         if p.dt is None:
             if verb == "напомни":
-                self.pending[source] = {"kind": "time", "title": task, "verb": verb}
-                return "Когда напомнить?"
+                return self._ask(source, {"kind": "time", "title": task, "verb": verb}, f"Когда напомнить, {a}?")
             self.store.add_item("task", task, None)
             return f"Записал задачу: {task}. Срока нет."
         return self._create(task, p.dt, p.has_time, verb)
@@ -138,20 +214,41 @@ class Assistant:
         self.store.add_item("task", title, dt, offs)
         return f"Записал: {title}. Срок {fmt.fmt_when(dt, now, has_time)}. Напомню заранее."
 
-    def _answer_pending(self, source: str, text: str) -> str | None:
+    def _answer_pending(self, source: str, text: str, low: str) -> str | None:
+        """Ответ на открытый вопрос. None — это не ответ: разбираем как обычную команду."""
         st = self.pending[source]
-        if st["kind"] == "time":
+        kind = st["kind"]
+        if kind == "review":
+            if YES.match(low):
+                del self.pending[source]
+                return self._list_unrecognized()
+            if NO.match(low):
+                del self.pending[source]
+                return f"Хорошо, {self.cfg.address}."
+            return None
+        if kind == "time":
             p = parse_when(text, self.now())
             if p.dt is None:
-                return None  # это не ответ на вопрос — разбираем как обычную команду
+                return None
             del self.pending[source]
+            if st.get("date") is not None:  # дата уже известна, спрашивали только время
+                if not p.has_time:
+                    return None
+                return self._create(st["title"], datetime.combine(st["date"], p.dt.time()), True, st["verb"])
             return self._create(st["title"], p.dt, p.has_time, st["verb"])
+        if kind == "ask":
+            r = resolve_ask(st["ask"], text, self.now(), st.get("tm"))
+            if r is None:
+                return None
+            del self.pending[source]
+            if r.has_time or st["verb"] == "запомни":  # у задачи без времени срок — 18:00
+                return self._create(st["title"], r.dt, r.has_time, st["verb"])
+            return self._ask(source, {"kind": "time", "title": st["title"], "verb": st["verb"],
+                                      "date": r.dt.date()}, f"Во сколько, {self.cfg.address}?")
+        # kind == "text": ждали название дела
         del self.pending[source]
         task = _clean_task(text)
-        if st["when"] is None:
-            self.store.add_item("task" if st["verb"] == "запомни" else "reminder", task, None)
-            return "Записал."
-        return self._create(task, st["when"], st["has_time"], st["verb"])
+        return self._schedule(source, task, st["p"], st["verb"])
 
     def _list(self, low: str) -> str:
         now = self.now()

@@ -12,6 +12,11 @@ def plural(n: int, one: str, few: str, many: str) -> str:
     return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
 
 
+def unclear_phrases(n: int) -> str:
+    """«2 непонятные фразы», «5 непонятных фраз», «1 непонятная фраза»."""
+    return f"{n} {plural(n, 'непонятная фраза', 'непонятные фразы', 'непонятных фраз')}"
+
+
 def human_delta(minutes: int) -> str:
     if minutes >= 1440:
         d = minutes // 1440

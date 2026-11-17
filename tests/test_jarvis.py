@@ -107,14 +107,14 @@ def test_missed_alerts_collapse_when_jarvis_was_off(env):
 
 def test_reminder_asks_when_then_answers(env):
     a, store, _ = env
-    assert a.handle("напомни полить цветы") == "Когда напомнить?"
+    assert a.handle("напомни полить цветы") == "Когда напомнить, сэр?"
     assert "Напомню завтра в 09:00" in a.handle("завтра в 9 утра")
     assert store.active()[0]["title"] == "Полить цветы"
 
 
 def test_remind_missing_text_then_text(env):
     a, store, _ = env
-    assert a.handle("напомни завтра в 9 утра") == "О чём напомнить?"
+    assert a.handle("напомни завтра в 9 утра") == "О чём напомнить, сэр?"
     a.handle("позвонить в банк")
     assert store.active()[0]["title"] == "Позвонить в банк"
 
@@ -153,7 +153,7 @@ def test_cancel_pending(env):
 
 def test_unknown_and_help(env):
     a, _, _ = env
-    assert "Не понял" in a.handle("абракадабра")
+    assert "не расслышал" in a.handle("абракадабра")
     assert "запоминать" in a.handle("что ты умеешь")
 
 

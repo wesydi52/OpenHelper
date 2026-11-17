@@ -19,6 +19,10 @@ class Config:
     home: Path = field(default_factory=_home)
     city: str = field(default_factory=lambda: os.environ.get("JARVIS_CITY", "Москва"))
     user_name: str = field(default_factory=lambda: os.environ.get("JARVIS_USER", ""))
+    # Как Джарвис обращается к владельцу в официальных репликах («Прошу прощения, сэр…»)
+    address: str = field(default_factory=lambda: os.environ.get("JARVIS_ADDRESS", "сэр"))
+    # Во сколько раз в день напоминать о журнале непонятных фраз (ЧЧ:ММ)
+    review_time: str = field(default_factory=lambda: os.environ.get("JARVIS_REVIEW_TIME", "20:00"))
     # Слово активации + варианты, как его часто «слышит» распознавание
     wake_words: list = field(default_factory=lambda: _list(
         "JARVIS_WAKE_WORDS", "джарвис,жарвис,джарвиз,джервис,джарвес,jarvis"))

@@ -50,7 +50,8 @@ def main(argv=None):
         if bot:
             bot.send(text)
 
-    sched = Scheduler(store, notify)
+    sched = Scheduler(store, notify, review=assistant.daily_review,
+                      notify_tg=bot.send if bot else None)
     sched.start()
     if bot:
         bot.start()
